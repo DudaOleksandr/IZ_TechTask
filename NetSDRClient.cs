@@ -7,11 +7,19 @@ namespace IZTechTask;
 
 public class NetSdrClient : IDisposable
 {
+    public event Action<ushort, byte[]> OnUnsolicitedControlItem;
+    
     private TcpClient _tcpClient;
     private NetworkStream _stream;
     
     private const ushort ReceiverStateCode = 0x0018;
     private const ushort ReceiverFrequencyCode = 0x0020;
+    private readonly CancellationTokenSource _cancellationTokenSource;
+    
+    public NetSdrClient()
+    {
+        _cancellationTokenSource = new CancellationTokenSource();
+    }
     
     private bool IsConnected => _tcpClient?.Connected ?? false;
     
@@ -21,10 +29,14 @@ public class NetSdrClient : IDisposable
         _tcpClient = new TcpClient();
         _tcpClient.Connect(host, port);
         _stream = _tcpClient.GetStream();
+        
+        _ = StartListeningAsync(_cancellationTokenSource.Token);
     }
 
     public void Disconnect()
     {
+        _cancellationTokenSource?.Cancel();
+        _cancellationTokenSource?.Dispose();
         _stream?.Dispose();
         _tcpClient?.Dispose();
     }
@@ -79,20 +91,90 @@ public class NetSdrClient : IDisposable
     private void SendControlItem(ushort controlCode, byte[] parameters)
     {
         EnsureConnected();
-
-        throw new NotImplementedException();
         
+        var totalLength = 4 + (parameters?.Length ?? 0); // Заголовок (4 байти) + параметри
+        if (totalLength > 8194)
+            throw new NetSdrException("Message length exceeds maximum allowed size.");
+        
+        Span<byte> message = stackalloc byte[totalLength];
+        
+        var lengthField = (ushort)(totalLength - 2);
+        var headerValue = (ushort)((lengthField & 0x1FFF) | ((ushort)MessageType.SetControlItem << 13));
+        
+        BinaryPrimitives.WriteUInt16LittleEndian(message, headerValue);
+        BinaryPrimitives.WriteUInt16LittleEndian(message[2..], controlCode);
+        parameters?.AsSpan().CopyTo(message[4..]);
+        
+        _stream.Write(message);
         HandleResponse(controlCode);
     }
 
     private void HandleResponse(ushort expectedControlCode)
     {
-        throw new NotImplementedException();
-    }
+        Span<byte> header = stackalloc byte[4];
+        _stream.ReadExactly(header);
+        
+        var length = BinaryPrimitives.ReadUInt16LittleEndian(header);
+        var typeField = (byte)((header[1] >> 5) & 0x07);
+        var controlCode = BinaryPrimitives.ReadUInt16LittleEndian(header[2..]);
 
+        // NAK
+        if (length == 2 && (MessageType)typeField == MessageType.ResponseToSetOrRequest)
+        {
+            throw new NetSdrException("NAK received: Control Item not supported.");
+        }
+
+        // Unsolicited Control Item
+        if ((MessageType)typeField == MessageType.UnsolicitedControlItem)
+        {
+            Span<byte> body = stackalloc byte[length - 4];
+            _stream.ReadExactly(body);
+            OnUnsolicitedControlItem?.Invoke(controlCode, body.ToArray());
+            return;
+        }
+        
+        if (controlCode != expectedControlCode)
+            throw new NetSdrException($"Unexpected response code: 0x{controlCode:X4}");
+
+        // ACK
+        if (length > 4)
+        {
+            Span<byte> body = stackalloc byte[length - 4];
+            _stream.ReadExactly(body);
+        }
+    }
     private void EnsureConnected()
     {
         if (!IsConnected) throw new NetSdrException("Not connected");
+    }
+    
+    private async Task StartListeningAsync(CancellationToken cancellationToken)
+    {
+        var headerBuffer = new byte[4];
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await _stream.ReadExactlyAsync(headerBuffer, cancellationToken);
+                
+                var length = BinaryPrimitives.ReadUInt16LittleEndian(headerBuffer);
+                var type = (byte)((headerBuffer[1] >> 5) & 0x07);
+                var controlCode = BinaryPrimitives.ReadUInt16LittleEndian(headerBuffer.AsSpan(2));
+
+                if (type == (byte)MessageType.UnsolicitedControlItem)
+                {
+                    var bodyBuffer = new byte[length - 4];
+                    await _stream.ReadExactlyAsync(bodyBuffer, cancellationToken);
+                    
+                    OnUnsolicitedControlItem?.Invoke(controlCode, bodyBuffer);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in StartListeningAsync: {ex.Message}");
+            }
+        }
     }
 
     public void Dispose() => Disconnect();
