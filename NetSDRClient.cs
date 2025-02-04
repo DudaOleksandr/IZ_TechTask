@@ -11,14 +11,16 @@ public class NetSdrClient : IDisposable
     
     private TcpClient _tcpClient;
     private NetworkStream _stream;
+    private IqDataReceiver _iqDataReceiver;
     
     private const ushort ReceiverStateCode = 0x0018;
     private const ushort ReceiverFrequencyCode = 0x0020;
     private readonly CancellationTokenSource _cancellationTokenSource;
     
-    public NetSdrClient()
+    public NetSdrClient(TcpClient? tcpClient = null)
     {
         _cancellationTokenSource = new CancellationTokenSource();
+        _tcpClient = tcpClient ?? new TcpClient();
     }
     
     private bool IsConnected => _tcpClient?.Connected ?? false;
@@ -26,7 +28,6 @@ public class NetSdrClient : IDisposable
     public void Connect(string host, int port = 50000)
     {
         Disconnect();
-        _tcpClient = new TcpClient();
         _tcpClient.Connect(host, port);
         _stream = _tcpClient.GetStream();
         
@@ -72,6 +73,18 @@ public class NetSdrClient : IDisposable
                 0x00
             ]
         );
+    }
+    
+    public void StartIqDataReceiver(string outputFilePath)
+    {
+        _iqDataReceiver = new IqDataReceiver(outputFilePath);
+        _ = _iqDataReceiver.StartReceivingAsync();
+    }
+    
+    public void StopIqDataReceiver()
+    {
+        _iqDataReceiver?.StopReceiving();
+        _iqDataReceiver?.Dispose();
     }
 
     // 4.2.3 Receiver Frequency
@@ -177,6 +190,10 @@ public class NetSdrClient : IDisposable
         }
     }
 
-    public void Dispose() => Disconnect();
+    public void Dispose()
+    {
+        StopIqDataReceiver();
+        Disconnect();
+    }
 }
 

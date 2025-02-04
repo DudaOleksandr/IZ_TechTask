@@ -1,3 +1,21 @@
-﻿// See https://aka.ms/new-console-template for more information
+﻿using IZTechTask;
+using IZTechTask.Enums;
 
-Console.WriteLine("Hello, World!");
+var outputFilePath = "iq_data.bin";
+
+using (var netSdrClient = new NetSdrClient())
+{
+    netSdrClient.Connect("localhost");
+    
+    netSdrClient.StartIqStream(DataFormat.Real, CaptureMode.Contiguous16Bit);
+    
+    netSdrClient.StartIqDataReceiver(outputFilePath);
+
+    Console.WriteLine("Press Enter to stop receiving...");
+    Console.ReadLine();
+
+    netSdrClient.StopIqDataReceiver();
+    netSdrClient.StopIqStream();
+}
+
+Console.WriteLine("Data receiving stopped. File saved.");
